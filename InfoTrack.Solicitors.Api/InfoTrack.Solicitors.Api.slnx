@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="../InfoTrack.Solicitors.Api.Tests/InfoTrack.Solicitors.Api.Tests.csproj" />
+  <Project Path="../InfoTrack.Solicitors.Web/InfoTrack.Solicitors.Web.esproj">
+    <Build />
+    <Deploy />
+  </Project>
+  <Project Path="InfoTrack.Solicitors.Api.csproj" />
+</Solution>

@@ -1,0 +1,6 @@
+@InfoTrack.Solicitors.Api_HostAddress = http://localhost:5265
+
+GET {{InfoTrack.Solicitors.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
