@@ -532,7 +532,7 @@ function App() {
                         const path = buildExportPath('/api/solicitors/export/excel', selected, sourceName, sourceUrl);
                         try {
                             const res = await apiFetch(path);
-                            await downloadResponseAsFile(res, `solicitors-${new Date().toISOString().replace(/[:.]/g, '-')}.xlsx`);
+                            await downloadResponseAsFile(res, `solicitors-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`);
                         } catch (err) {
                             // eslint-disable-next-line no-console
                             console.error('Export Excel failed', err);

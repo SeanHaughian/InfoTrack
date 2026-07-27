@@ -2,6 +2,8 @@ using InfoTrack.Solicitors.Api.Models;
 using InfoTrack.Solicitors.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
+using System.Text;
+using System.Text.Json;
 using System.IO.Compression;
 using System.Xml.Linq;
 using System.Text.RegularExpressions;
@@ -20,6 +22,158 @@ public sealed class SolicitorsController : ControllerBase
     {
         _scraper = scraper;
         _cache = cache;
+    }
+
+    // Export current filtered results as JSON file
+    [HttpGet("export/json")]
+    public async Task<IActionResult> ExportJson([
+        FromQuery] string? locations,
+        [FromQuery] string? sourceName = null,
+        [FromQuery] string? sourceUrl = null)
+    {
+        // Reuse same cache key construction as other endpoints
+        var requested = Array.Empty<string>();
+        if (!string.IsNullOrWhiteSpace(locations))
+        {
+            requested = locations.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
+        }
+
+        var cacheKey = requested == null || requested.Length == 0
+            ? "__all_locations__"
+            : string.Join("|", requested.OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
+
+        if (!string.IsNullOrWhiteSpace(sourceName) || !string.IsNullOrWhiteSpace(sourceUrl))
+        {
+            var src = !string.IsNullOrWhiteSpace(sourceName) ? sourceName : sourceUrl;
+            cacheKey = $"{cacheKey}:source={src}";
+        }
+
+        var version = _cache.Get<string>("solicitors:version") ?? string.Empty;
+        var versionedKey = string.IsNullOrEmpty(version) ? cacheKey : $"{version}:{cacheKey}";
+
+        var fullList = await _cache.GetOrCreateAsync(versionedKey, async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5);
+
+            IReadOnlyList<SolicitorResult> all;
+            if (!string.IsNullOrWhiteSpace(sourceUrl) || string.Equals(sourceName, "CLC", StringComparison.OrdinalIgnoreCase))
+            {
+                var url = !string.IsNullOrWhiteSpace(sourceUrl)
+                    ? sourceUrl
+                    : "https://www.clc-uk.org/wp-content/uploads/2026/06/List-of-CLC-regulated-practices-as-of-04.06.2026.xlsx";
+
+                var scrapedFromXlsx = await ScrapeFromXlsxUrlAsync(url, HttpContext.RequestAborted);
+                all = scrapedFromXlsx;
+            }
+            else
+            {
+                var scraped = await _scraper.ScrapeAsync(requested, HttpContext.RequestAborted);
+                all = scraped;
+            }
+
+            // Apply any global deletions
+            var deleted = _cache.Get<HashSet<string>>("solicitors:deleted");
+            var listAll = all.ToList();
+            if (deleted != null && deleted.Count > 0)
+            {
+                listAll = listAll.Where(s => !deleted.Contains(MakeUniqueKey(s.Name, s.Location, s.Website))).ToList();
+            }
+
+            return listAll;
+        });
+
+        var json = JsonSerializer.Serialize(fullList, new JsonSerializerOptions { WriteIndented = true });
+        var bytes = Encoding.UTF8.GetBytes(json);
+        var fname = $"solicitors-{DateTime.UtcNow:yyyy-MM-ddTHH-mm-ssZ}.json";
+        return File(bytes, "application/json", fname);
+    }
+
+    // Export current filtered results as CSV (served as download). Produces a simple CSV which Excel can open.
+    [HttpGet("export/excel")]
+    public async Task<IActionResult> ExportExcel([
+        FromQuery] string? locations,
+        [FromQuery] string? sourceName = null,
+        [FromQuery] string? sourceUrl = null)
+    {
+        // Reuse same cache retrieval logic
+        var requested = Array.Empty<string>();
+        if (!string.IsNullOrWhiteSpace(locations))
+        {
+            requested = locations.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
+        }
+
+        var cacheKey = requested == null || requested.Length == 0
+            ? "__all_locations__"
+            : string.Join("|", requested.OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
+
+        if (!string.IsNullOrWhiteSpace(sourceName) || !string.IsNullOrWhiteSpace(sourceUrl))
+        {
+            var src = !string.IsNullOrWhiteSpace(sourceName) ? sourceName : sourceUrl;
+            cacheKey = $"{cacheKey}:source={src}";
+        }
+
+        var version = _cache.Get<string>("solicitors:version") ?? string.Empty;
+        var versionedKey = string.IsNullOrEmpty(version) ? cacheKey : $"{version}:{cacheKey}";
+
+        var fullList = await _cache.GetOrCreateAsync(versionedKey, async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5);
+
+            IReadOnlyList<SolicitorResult> all;
+            if (!string.IsNullOrWhiteSpace(sourceUrl) || string.Equals(sourceName, "CLC", StringComparison.OrdinalIgnoreCase))
+            {
+                var url = !string.IsNullOrWhiteSpace(sourceUrl)
+                    ? sourceUrl
+                    : "https://www.clc-uk.org/wp-content/uploads/2026/06/List-of-CLC-regulated-practices-as-of-04.06.2026.xlsx";
+
+                var scrapedFromXlsx = await ScrapeFromXlsxUrlAsync(url, HttpContext.RequestAborted);
+                all = scrapedFromXlsx;
+            }
+            else
+            {
+                var scraped = await _scraper.ScrapeAsync(requested, HttpContext.RequestAborted);
+                all = scraped;
+            }
+
+            // Apply any global deletions
+            var deleted = _cache.Get<HashSet<string>>("solicitors:deleted");
+            var listAll = all.ToList();
+            if (deleted != null && deleted.Count > 0)
+            {
+                listAll = listAll.Where(s => !deleted.Contains(MakeUniqueKey(s.Name, s.Location, s.Website))).ToList();
+            }
+
+            return listAll;
+        });
+
+        var sb = new StringBuilder();
+        sb.AppendLine("Name,Location,Address,Website,Phone,ReviewCount");
+        foreach (var s in fullList)
+        {
+            var name = EscapeCsv(s.Name);
+            var loc = EscapeCsv(s.Location);
+            var addr = EscapeCsv(s.Address ?? string.Empty);
+            var web = EscapeCsv(s.Website ?? string.Empty);
+            var phone = EscapeCsv(s.Phone ?? string.Empty);
+            var rev = s.ReviewCount?.ToString() ?? string.Empty;
+            sb.AppendLine($"{name},{loc},{addr},{web},{phone},{rev}");
+        }
+
+        var csv = sb.ToString();
+        var bytes = Encoding.UTF8.GetBytes(csv);
+        var fname = $"solicitors-{DateTime.UtcNow:yyyy-MM-ddTHH-mm-ssZ}.csv";
+        return File(bytes, "text/csv", fname);
+    }
+
+    private static string EscapeCsv(string s)
+    {
+        if (s == null) return string.Empty;
+        if (s.Contains('"')) s = s.Replace("\"", "\"\"");
+        if (s.Contains(',') || s.Contains('"') || s.Contains('\n') || s.Contains('\r'))
+        {
+            return '"' + s + '"';
+        }
+        return s;
     }
 
     // Minimal XLSX (Office Open XML) parser that reads the first worksheet and shared strings
@@ -163,108 +317,20 @@ public sealed class SolicitorsController : ControllerBase
         return results;
     }
 
-    [HttpGet]
-    public async Task<ActionResult<PagedResult<SolicitorResult>>> Get([
-        FromQuery] string? locations,
-        [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 50,
-        [FromQuery] string? sourceName = null,
-        [FromQuery] string? sourceUrl = null)
+    // Helper: get the full list of solicitors for the supplied query parameters.
+    // This consolidates caching and source selection so controller actions stay simple.
+    private async Task<List<SolicitorResult>> GetFullListAsync(string? locations, string? sourceName, string? sourceUrl, CancellationToken cancellationToken)
     {
-        // locations expected as comma separated values (e.g. "London,Birmingham")
-        var requested = Array.Empty<string>();
-        if (!string.IsNullOrWhiteSpace(locations))
-        {
-            requested = locations.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
-        }
-        var currentPage = Math.Max(1, page);
-        var currentPageSize = Math.Clamp(pageSize, 1, 500);
-
-        // Cache key based on requested locations (order-independent)
-        var key = requested == null || requested.Length == 0
-            ? "__all_locations__"
-            : string.Join("|", requested.OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
-
-        // Include source identity in cache key so different sources don't collide
-        if (!string.IsNullOrWhiteSpace(sourceName) || !string.IsNullOrWhiteSpace(sourceUrl))
-        {
-            var src = !string.IsNullOrWhiteSpace(sourceName) ? sourceName : sourceUrl;
-            key = $"{key}:source={src}";
-        }
-
-        // Support a simple cache version token so we can invalidate all cached results when needed.
-        var version = _cache.Get<string>("solicitors:version") ?? string.Empty;
-        var versionedKey = string.IsNullOrEmpty(version) ? key : $"{version}:{key}";
-
-        // Try to get full collected results from cache. If missing, scrape once for all items and cache for short TTL.
-        var fullList = await _cache.GetOrCreateAsync(versionedKey, async entry =>
-        {
-            // short TTL to keep results reasonably fresh
-            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5);
-
-            // Scrape once for all items. Support an optional custom source (e.g. CLC .xlsx).
-            IReadOnlyList<SolicitorResult> all;
-            if (!string.IsNullOrWhiteSpace(sourceUrl) || string.Equals(sourceName, "CLC", StringComparison.OrdinalIgnoreCase))
-            {
-                var url = !string.IsNullOrWhiteSpace(sourceUrl)
-                    ? sourceUrl
-                    : "https://www.clc-uk.org/wp-content/uploads/2026/06/List-of-CLC-regulated-practices-as-of-04.06.2026.xlsx";
-
-                var scrapedFromXlsx = await ScrapeFromXlsxUrlAsync(url, HttpContext.RequestAborted);
-                all = scrapedFromXlsx;
-            }
-            else
-            {
-                var scraped = await _scraper.ScrapeAsync(requested, HttpContext.RequestAborted);
-                all = scraped;
-            }
-
-            // Apply any global deletions
-            var deleted = _cache.Get<HashSet<string>>("solicitors:deleted");
-            var listAll = all.ToList();
-            if (deleted != null && deleted.Count > 0)
-            {
-                listAll = listAll.Where(s => !deleted.Contains(MakeUniqueKey(s.Name, s.Location, s.Website))).ToList();
-            }
-
-            return listAll;
-        });
-
-        var total = fullList.Count;
-
-        var items = fullList
-            .Skip((currentPage - 1) * currentPageSize)
-            .Take(currentPageSize)
-            .ToArray();
-
-        var paged = new PagedResult<SolicitorResult>(items, total, currentPage, currentPageSize, false);
-
-        return Ok(paged);
-    }
-
-    // Delete a specific solicitor from the in-memory results cache for the supplied locations.
-    [HttpGet("insights")]
-    public async Task<ActionResult<IEnumerable<SolicitorResult>>> GetInsights(
-        [FromQuery] int top = 10,
-        [FromQuery] string? locations = null,
-        [FromQuery] string? sourceName = null,
-        [FromQuery] string? sourceUrl = null)
-    {
-        var topCount = Math.Clamp(top, 1, 100);
-
-        // locations expected as comma separated values (e.g. "London,Birmingham")
         var requested = Array.Empty<string>();
         if (!string.IsNullOrWhiteSpace(locations))
         {
             requested = locations.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
         }
 
-        // Cache key based on requested locations (order-independent)
         var cacheKey = requested == null || requested.Length == 0
             ? "__all_locations__"
             : string.Join("|", requested.OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
 
-        // Include source identity in cache key so different sources don't collide
         if (!string.IsNullOrWhiteSpace(sourceName) || !string.IsNullOrWhiteSpace(sourceUrl))
         {
             var src = !string.IsNullOrWhiteSpace(sourceName) ? sourceName : sourceUrl;
@@ -285,13 +351,11 @@ public sealed class SolicitorsController : ControllerBase
                     ? sourceUrl
                     : "https://www.clc-uk.org/wp-content/uploads/2026/06/List-of-CLC-regulated-practices-as-of-04.06.2026.xlsx";
 
-                var scrapedFromXlsx = await ScrapeFromXlsxUrlAsync(url, HttpContext.RequestAborted);
-                all = scrapedFromXlsx;
+                all = await ScrapeFromXlsxUrlAsync(url, cancellationToken);
             }
             else
             {
-                var scraped = await _scraper.ScrapeAsync(requested, HttpContext.RequestAborted);
-                all = scraped;
+                all = await _scraper.ScrapeAsync(requested, cancellationToken);
             }
 
             // Apply any global deletions
@@ -305,9 +369,40 @@ public sealed class SolicitorsController : ControllerBase
             return listAll;
         });
 
-        // Rank by review count (highest to lowest) and return top N
-        var insights = fullList
-            .Where(s => s.ReviewCount.HasValue && s.ReviewCount.Value > 0)
+        return fullList.ToList();
+    }
+
+    [HttpGet]
+    public async Task<ActionResult<PagedResult<SolicitorResult>>> Get([
+        FromQuery] string? locations,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 50,
+        [FromQuery] string? sourceName = null,
+        [FromQuery] string? sourceUrl = null)
+    {
+        var currentPage = Math.Max(1, page);
+        var currentPageSize = Math.Clamp(pageSize, 1, 500);
+
+        var fullList = await GetFullListAsync(locations, sourceName, sourceUrl, HttpContext.RequestAborted);
+
+        var total = fullList.Count;
+        var items = fullList.Skip((currentPage - 1) * currentPageSize).Take(currentPageSize).ToArray();
+
+        return Ok(new PagedResult<SolicitorResult>(items, total, currentPage, currentPageSize, false));
+    }
+
+    // Delete a specific solicitor from the in-memory results cache for the supplied locations.
+    [HttpGet("insights")]
+    public async Task<ActionResult<IEnumerable<SolicitorResult>>> GetInsights(
+        [FromQuery] int top = 10,
+        [FromQuery] string? locations = null,
+        [FromQuery] string? sourceName = null,
+        [FromQuery] string? sourceUrl = null)
+    {
+        var topCount = Math.Clamp(top, 1, 100);
+        var fullList = await GetFullListAsync(locations, sourceName, sourceUrl, HttpContext.RequestAborted);
+
+        var insights = fullList.Where(s => s.ReviewCount.HasValue && s.ReviewCount.Value > 0)
             .OrderByDescending(s => s.ReviewCount)
             .ThenBy(s => s.Name)
             .Take(topCount)
@@ -320,13 +415,6 @@ public sealed class SolicitorsController : ControllerBase
     public ActionResult Delete([FromBody] DeleteSolicitorRequest? request)
     {
         if (request == null || string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Location)) return BadRequest();
-
-        var requested = Array.Empty<string>();
-        if (!string.IsNullOrWhiteSpace(request.Locations))
-        {
-            requested = request.Locations.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
-        }
-
         var unique = MakeUniqueKey(request.Name, request.Location, request.Website);
 
         // maintain a global deleted set so deletions apply across cached queries
@@ -335,25 +423,8 @@ public sealed class SolicitorsController : ControllerBase
         deleted.Add(unique);
         _cache.Set(deletedKey, deleted, TimeSpan.FromHours(1));
 
-        // Invalidate current cache version so callers will re-evaluate data if needed
+        // Bump cache version so callers will refresh
         _cache.Set("solicitors:version", Guid.NewGuid().ToString());
-
-        // Recreate the cache key for the supplied locations so we can attempt to update any cached list immediately
-        var key = requested == null || requested.Length == 0
-            ? "__all_locations__"
-            : string.Join("|", requested.OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
-
-        // If we have a cached list for the current version+key, update it immediately so subsequent GETs reflect deletion.
-        var version = _cache.Get<string>("solicitors:version") ?? string.Empty;
-        var versionedKey = string.IsNullOrEmpty(version) ? key : $"{version}:{key}";
-        if (_cache.TryGetValue(versionedKey, out object? cached))
-        {
-            if (cached is List<SolicitorResult> list)
-            {
-                var filtered = list.Where(s => !deleted.Contains(MakeUniqueKey(s.Name, s.Location, s.Website))).ToList();
-                _cache.Set(versionedKey, filtered, TimeSpan.FromMinutes(5));
-            }
-        }
 
         return NoContent();
     }
