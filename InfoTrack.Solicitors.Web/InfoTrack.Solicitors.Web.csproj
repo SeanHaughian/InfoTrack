@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+	<TargetFramework>net8.0</TargetFramework>
+	<ImplicitUsings>enable</ImplicitUsings>
+	<Nullable>enable</Nullable>
+	<GenerateProgramFile>false</GenerateProgramFile>
+  </PropertyGroup>
+
+  <!-- Intentionally do not include frontend files as explicit Content to avoid duplicate items -->
+
+</Project>
