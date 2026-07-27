@@ -54,6 +54,10 @@ Testing
 - Run unit tests from the solution root:
   - dotnet test
 
+Data Storage
+-------
+- Data from snapshots / locations from local sessions is stored in %LOCALAPPDATA%\InfoTrack.Solicitors
+
 Sample data / export
 --------------------
 - The application supports exporting results as JSON and Excel-compatible CSV. Exports are available from the UI and API.
