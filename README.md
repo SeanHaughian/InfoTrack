@@ -66,6 +66,7 @@ Sample data / export
 High-level features
 -------------------
 - Default source scraping (configurable) for conveyancing listings.
+- Pagination enabled for results (set to 50)
 - Manage location sets in the UI (add/remove locations) and run scrapes against those sets.
 - Save scrape results and compare states when the same location set is used to detect new or removed solicitors.
 - Export results to JSON or Excel/CSV from the UI or API.
